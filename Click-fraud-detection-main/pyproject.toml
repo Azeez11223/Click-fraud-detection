@@ -1,0 +1,21 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "S", "B", "UP"]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "S101",   # assert in tests is fine
+    "S104",   # binding to 0.0.0.0 — intentional in Docker
+    "S603",   # subprocess without shell — not used
+    "S608",   # SQL injection — we use parameterised queries
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106"]
+"data/*" = ["S311"]  # pseudo-random in synthetic data is fine
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
