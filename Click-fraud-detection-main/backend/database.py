@@ -159,7 +159,10 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
         name TEXT NOT NULL, ad_type TEXT NOT NULL, platform TEXT NOT NULL,
         purpose TEXT NOT NULL, status TEXT DEFAULT 'Active',
-        api_key_hash TEXT,
+        api_key_hash TEXT, cpc REAL NOT NULL DEFAULT 0.50,
+        avg_conversion_value REAL NOT NULL DEFAULT 25.0,
+        expected_conversion_rate REAL NOT NULL DEFAULT 0.02,
+        block_threshold REAL,
         created_at TEXT DEFAULT (datetime('now')),
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE)""")
     c.execute("""CREATE TABLE IF NOT EXISTS campaign_clicks (
@@ -217,6 +220,14 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_pe_campaign_ip_time ON platform_events(campaign_id, ip_address, created_at)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_idr_dataset ON ip_dataset_rows(dataset_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_audit_actor_time ON audit_events(actor_user_id,created_at DESC)")
+
+    campaign_columns = {row[1] for row in c.execute("PRAGMA table_info(campaigns)").fetchall()}
+    for column, declaration in {"cpc": "REAL NOT NULL DEFAULT 0.50",
+                                "avg_conversion_value": "REAL NOT NULL DEFAULT 25.0",
+                                "expected_conversion_rate": "REAL NOT NULL DEFAULT 0.02",
+                                "block_threshold": "REAL"}.items():
+        if column not in campaign_columns:
+            c.execute(f"ALTER TABLE campaigns ADD COLUMN {column} {declaration}")
 
     # Additive local SQLite upgrade for databases created before score metadata/idempotency.
     for table, additions in {
@@ -404,11 +415,12 @@ def get_audit_events(limit=100, offset=0):
         conn.close()
 
 
-def insert_campaign(user_id, name, ad_type, platform, purpose, api_key_hash=None):
+def insert_campaign(user_id, name, ad_type, platform, purpose, api_key_hash=None,
+                    cpc=0.50, avg_conversion_value=25.0, expected_conversion_rate=0.02):
     conn = get_connection()
     conn.execute(
-        "INSERT INTO campaigns (user_id,name,ad_type,platform,purpose,api_key_hash) VALUES (?,?,?,?,?,?)",
-        (user_id, name, ad_type, platform, purpose, api_key_hash),
+        "INSERT INTO campaigns (user_id,name,ad_type,platform,purpose,api_key_hash,cpc,avg_conversion_value,expected_conversion_rate) VALUES (?,?,?,?,?,?,?,?,?)",
+        (user_id, name, ad_type, platform, purpose, api_key_hash, cpc, avg_conversion_value, expected_conversion_rate),
     )
     conn.commit()
     cid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -419,7 +431,7 @@ def insert_campaign(user_id, name, ad_type, platform, purpose, api_key_hash=None
 def _camp_q(extra=""):
     """Campaign query with aggregated click counts using a single LEFT JOIN + GROUP BY."""
     return f"""SELECT c.id, c.user_id, c.name, c.ad_type, c.platform, c.purpose,
-        c.status, c.api_key_hash, c.created_at,
+        c.status, c.api_key_hash, c.created_at, c.cpc, c.avg_conversion_value, c.expected_conversion_rate, c.block_threshold,
         COUNT(cc.id) AS click_count,
         COALESCE(SUM(CASE WHEN cc.classification='FRAUD' THEN 1 ELSE 0 END), 0) AS fraud_count,
         COALESCE(SUM(CASE WHEN cc.classification='VALID' THEN 1 ELSE 0 END), 0) AS valid_count,
@@ -533,15 +545,20 @@ def classify_click(campaign_id, ip_address, user_agent, user_id=None, include_de
         ).fetchone()[0] if len(parts) == 4 else 0
         # Shared risk scorer combines server-observed click activity with optional native ML.
         from app.services.decision import decide
+        from app.services.economics import recommended_block_threshold
         from app.services.features import build_features
         from app.services.rules import rule_decision
         from app.services.scoring import score
         features = build_features(ip_click_count=c1, click_interval=interval,
             user_agent=user_agent, subnet_click_count=subnet_count, ua_click_count=cu)
         scored = score(features)
+        campaign = conn.execute("SELECT cpc,avg_conversion_value,expected_conversion_rate,block_threshold FROM campaigns WHERE id=?",
+                                (campaign_id,)).fetchone()
+        live_threshold = campaign["block_threshold"] if campaign and campaign["block_threshold"] is not None else recommended_block_threshold(
+            campaign["cpc"], campaign["avg_conversion_value"], campaign["expected_conversion_rate"]) if campaign else None
         action, rule_reasons = rule_decision(ip_click_count=c1 + 1, ua_bot=bool(features["ua_bot"]),
             click_interval=interval, ua_click_count=cu + 1)
-        action = action or decide(scored["score"])
+        action = action or decide(scored["score"], live_threshold)
         reason_codes = rule_reasons or scored["reason_codes"]
         review_burst = max(1, int(os.getenv("IP_REVIEW_5MIN_THRESHOLD", "10")))
         review_ua = max(1, int(os.getenv("UA_REVIEW_10MIN_THRESHOLD", "15")))

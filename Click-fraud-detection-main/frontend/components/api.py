@@ -112,6 +112,14 @@ def _patch(path, params=None, auth=True, timeout=10):
         return {"detail": f"Request failed: {type(e).__name__}"}, 500
 
 
+def _patch_json(path, payload, timeout=10):
+    try:
+        r = requests.patch(f"{API_BASE}{path}", json=payload, headers=get_auth_headers(), timeout=timeout)
+        return _response_payload(r), r.status_code
+    except requests.exceptions.RequestException as e:
+        return {"detail": f"Request failed: {type(e).__name__}"}, 503
+
+
 # ── Auth ───────────────────────────────────────────────────────────────────────
 def auth_signup(name, email, password):
     return _post("/auth/signup", {"name": name, "email": email, "password": password})
@@ -169,8 +177,11 @@ def get_campaigns():
     return api_get_auth("/campaigns", default=[])
 
 
-def create_campaign(name, ad_type, platform, purpose):
-    return api_post_auth("/campaigns", {"name": name, "ad_type": ad_type, "platform": platform, "purpose": purpose})
+def create_campaign(name, ad_type, platform, purpose, cpc=0.50, avg_conversion_value=25.0,
+                   expected_conversion_rate=0.02):
+    return api_post_auth("/campaigns", {"name": name, "ad_type": ad_type, "platform": platform,
+        "purpose": purpose, "cpc": cpc, "avg_conversion_value": avg_conversion_value,
+        "expected_conversion_rate": expected_conversion_rate})
 
 
 def get_campaign(cid):
@@ -191,6 +202,20 @@ def get_campaign_clicks_api(cid, limit=100):
 
 def get_campaign_stats(cid):
     return api_get_auth(f"/campaigns/{cid}/stats", default={})
+
+
+def get_threshold_analysis(cid, threshold=None):
+    suffix = f"?threshold={threshold:.4f}" if threshold is not None else ""
+    return api_get_auth(f"/campaigns/{cid}/threshold-analysis{suffix}", default={})
+
+
+def update_campaign_economics(cid, cpc, avg_conversion_value, expected_conversion_rate):
+    return _patch_json(f"/campaigns/{cid}/economics", {"cpc": cpc,
+        "avg_conversion_value": avg_conversion_value, "expected_conversion_rate": expected_conversion_rate})
+
+
+def set_campaign_block_threshold(cid, threshold):
+    return _patch_json(f"/campaigns/{cid}/block-threshold", {"block_threshold": threshold})
 
 
 def get_campaign_alerts(cid):

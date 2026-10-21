@@ -4,6 +4,8 @@
 
 **Positioning:** AdShield is explainable, cost-aware, open-source click-fraud detection for small advertisers. It is an assistive prototype, not a replacement for commercial fraud-detection tools or ad-platform enforcement.
 
+The recommended block threshold is `C_fp / (C_fp + C_fn)`, where `C_fp = avg_conversion_value × expected_conversion_rate` estimates the cost of blocking a legitimate click, and `C_fn = CPC` estimates the cost of allowing a fraudulent click. These are assumptions, and historical what-if amounts are estimates from stored scores and classifications, not confirmed conversions or recovered spend.
+
 ---
 
 ## What's New in v3

@@ -54,6 +54,7 @@ from database import (
     get_campaign_clicks,
     get_campaign_owner_id,
     get_campaigns_by_user,
+    get_connection,
     get_click_features,
     get_hourly_platform_breakdown,
     get_ip_datasets,
@@ -266,6 +267,9 @@ class CampaignRequest(BaseModel):
     ad_type: str
     platform: str
     purpose: str
+    cpc: float = Field(default=0.50, ge=0, le=100000)
+    avg_conversion_value: float = Field(default=25.0, ge=0, le=10000000)
+    expected_conversion_rate: float = Field(default=0.02, ge=0, le=1)
 
     @field_validator("ad_type")
     @classmethod
@@ -490,13 +494,70 @@ def list_campaigns(limit: int = Query(100, ge=1, le=500), offset: int = Query(0,
 def create_campaign(req: CampaignRequest, user=Depends(get_current_user)):
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
-    cid = insert_campaign(user["user_id"], req.name, req.ad_type, req.platform, req.purpose, api_key_hash=key_hash)
+    cid = insert_campaign(user["user_id"], req.name, req.ad_type, req.platform, req.purpose,
+        api_key_hash=key_hash, cpc=req.cpc, avg_conversion_value=req.avg_conversion_value,
+        expected_conversion_rate=req.expected_conversion_rate)
     return {
         "message": "Campaign created",
         "campaign_id": cid,
         "api_key": raw_key,
         "note": "Save this API key — it will not be shown again.",
     }
+
+
+class CampaignEconomicsRequest(BaseModel):
+    cpc: float = Field(ge=0, le=100000)
+    avg_conversion_value: float = Field(ge=0, le=10000000)
+    expected_conversion_rate: float = Field(ge=0, le=1)
+
+
+@app.patch("/campaigns/{campaign_id}/economics", tags=["Campaigns"])
+def update_campaign_economics(campaign_id: int, req: CampaignEconomicsRequest,
+                              user=Depends(get_current_user)):
+    if not get_campaign_by_id(campaign_id, user["user_id"]):
+        raise HTTPException(404, "Campaign not found")
+    conn = get_connection()
+    conn.execute("UPDATE campaigns SET cpc=?,avg_conversion_value=?,expected_conversion_rate=? WHERE id=? AND user_id=?",
+        (req.cpc, req.avg_conversion_value, req.expected_conversion_rate, campaign_id, user["user_id"]))
+    conn.commit()
+    conn.close()
+    return {"message": "Campaign economics updated"}
+
+
+@app.get("/campaigns/{campaign_id}/threshold-analysis", tags=["Campaigns"])
+def campaign_threshold_analysis(campaign_id: int, threshold: float | None = Query(None, ge=0, le=1),
+                                user=Depends(get_current_user)):
+    campaign = get_campaign_by_id(campaign_id, user["user_id"])
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+    from app.services.economics import recommended_block_threshold, threshold_what_if
+    recommended = recommended_block_threshold(campaign["cpc"], campaign["avg_conversion_value"],
+                                               campaign["expected_conversion_rate"])
+    clicks = get_campaign_clicks(campaign_id, limit=500)
+    analysis = threshold_what_if(clicks, cpc=campaign["cpc"],
+        avg_conversion_value=campaign["avg_conversion_value"],
+        expected_conversion_rate=campaign["expected_conversion_rate"],
+        threshold=recommended if threshold is None else threshold)
+    return {"recommended_block_threshold": round(recommended, 4),
+            "active_block_threshold": campaign.get("block_threshold") or recommended, "analysis": analysis,
+            "estimate_notice": "Historical classification labels and scores are proxies, not verified outcomes."}
+
+
+class BlockThresholdRequest(BaseModel):
+    block_threshold: float = Field(ge=0.01, le=1.0)
+
+
+@app.patch("/campaigns/{campaign_id}/block-threshold", tags=["Campaigns"])
+def set_campaign_block_threshold(campaign_id: int, req: BlockThresholdRequest,
+                                 user=Depends(get_current_user)):
+    if not get_campaign_by_id(campaign_id, user["user_id"]):
+        raise HTTPException(404, "Campaign not found")
+    conn = get_connection()
+    conn.execute("UPDATE campaigns SET block_threshold=? WHERE id=? AND user_id=?",
+        (req.block_threshold, campaign_id, user["user_id"]))
+    conn.commit()
+    conn.close()
+    return {"block_threshold": req.block_threshold}
 
 
 @app.get("/campaigns/{campaign_id}", tags=["Campaigns"])

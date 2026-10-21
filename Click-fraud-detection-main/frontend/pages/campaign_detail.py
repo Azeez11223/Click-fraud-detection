@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 from components.api import (
     get_campaign, get_campaign_clicks_api,
     get_campaign_stats, get_campaign_alerts,
+    get_threshold_analysis, set_campaign_block_threshold,
     simulate_click,
 )
 from components.styles import apply_chart_theme
@@ -71,6 +72,25 @@ def render():
     sus_cnt    = stats.get("suspicious", 0)
     valid_cnt  = stats.get("valid", 0)
     fraud_rate = stats.get("fraud_rate", 0)
+
+    economics = get_threshold_analysis(campaign_id)
+    if economics:
+        recommended = float(economics.get("recommended_block_threshold", 0.75))
+        active_threshold = float(economics.get("active_block_threshold", recommended))
+        selected_threshold = st.slider("Block sensitivity (risk score)", 0.01, 1.0,
+            min(1.0, max(0.01, active_threshold)), 0.01, key=f"threshold_{campaign_id}")
+        if abs(selected_threshold - active_threshold) > 0.0001:
+            result, status = set_campaign_block_threshold(campaign_id, selected_threshold)
+            if status == 200:
+                active_threshold = selected_threshold
+            else:
+                st.error(result.get("detail", "Could not save campaign threshold"))
+        estimate = get_threshold_analysis(campaign_id, selected_threshold).get("analysis", {})
+        st.caption(f"Recommended: {recommended:.2f} · Active for future decisions: {active_threshold:.2f}. What-if uses up to 500 historical clicks; estimates are not realized savings.")
+        e1, e2, e3 = st.columns(3)
+        e1.metric("Estimated wasted spend saved", f"${estimate.get('estimated_wasted_spend_saved', 0):,.2f}")
+        e2.metric("Estimated legitimate conversions lost", f"{estimate.get('estimated_legitimate_conversions_lost', 0):.2f}")
+        e3.metric("Estimated conversion value lost", f"${estimate.get('estimated_conversion_value_lost', 0):,.2f}")
 
     # ── KPI cards ──────────────────────────────────────────────────────────────
     k1, k2, k3, k4, k5 = st.columns(5)
