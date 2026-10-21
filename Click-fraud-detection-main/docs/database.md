@@ -1,0 +1,5 @@
+# Database status
+
+`DATABASE_URL` selects PostgreSQL through a SQLAlchemy-managed psycopg2 pool (pool size 3, max overflow 2, pre-ping, 300-second recycle); PostgreSQL URLs default to `sslmode=require`. With no `DATABASE_URL`, local development and tests use SQLite. Production startup refuses to run without a database URL.
+
+Apply `alembic upgrade head` before starting the API. The initial migration creates timestamp-with-time-zone columns, cascades, classification checks, event idempotency constraints, and the requested indexes. The second migration adds audit records for IP list and dataset changes; audit metadata excludes raw IP addresses, and actor IDs become null when the account is deleted. The legacy helper layer still uses a compatibility adapter for parameter binding and SQL dialect differences. PostgreSQL integration tests are configured in CI. The migration chain compiles in PostgreSQL offline mode, but a live Postgres service is still required to verify actual runtime behavior before production use.

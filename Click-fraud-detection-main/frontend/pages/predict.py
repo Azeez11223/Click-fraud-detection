@@ -2,8 +2,9 @@
 pages/predict.py — Predict Fraud page
 """
 import random
-import streamlit as st
 from datetime import datetime
+
+import streamlit as st
 from components.api import api_post
 from components.charts import gauge_confidence
 
@@ -120,23 +121,8 @@ def render():
 
         st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
-        row2_col1, row2_col2, row2_col3 = st.columns(3)
-        with row2_col1:
-            click_interval = st.number_input(
-                "Click Interval (seconds)",
-                min_value=0.0,
-                value=float(pre.get("click_interval", 1.2)),
-                step=0.1,
-                help="Time since last click from this IP address",
-            )
-        with row2_col2:
-            ip_click_count = st.number_input(
-                "IP Click Count",
-                min_value=0,
-                value=int(pre.get("ip_click_count", 150)),
-                step=1,
-                help="Total number of clicks recorded from this IP",
-            )
+        st.caption("Click frequency and time since the previous click are computed from your stored events.")
+        row2_col3 = st.container()
         with row2_col3:
             st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
             submitted = st.form_submit_button(
@@ -153,8 +139,6 @@ def render():
             "device_type":    device_type,
             "browser":        browser,
             "timestamp":      timestamp,
-            "click_interval": click_interval,
-            "ip_click_count": ip_click_count,
             "geo_location":   geo_location,
         }
 
@@ -238,8 +222,6 @@ def render():
                     ("Device", device_type.title()),
                     ("Browser", browser),
                     ("Location", geo_location),
-                    ("Click Interval", f"{click_interval}s"),
-                    ("IP Click Count", str(ip_click_count)),
                     ("Hour", str(pd_safe_hour(timestamp))),
                 ]
                 for label, val in attrs:

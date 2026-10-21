@@ -1,6 +1,6 @@
 # AdShield v3 — Click Fraud Detection Platform
 
-> Production-grade fraud detection with **Realtime Google & Facebook monitoring**, **IP Block/Whitelist management**, and **bulk dataset uploads**.
+> A click fraud detection prototype with synthetic data, simulated platform events, IP lists, and bulk dataset uploads. It is not production-ready.
 
 ---
 
@@ -8,10 +8,10 @@
 
 | Feature | Description |
 |---------|-------------|
-| 📡 **Realtime Monitor** | Live Google & Facebook ad event feed with per-platform fraud charts, hourly breakdown, wasted spend tracking |
+| 📡 **Realtime Monitor** | Event feed and per-platform charts for simulated Google and Facebook events |
 | 🛡️ **IP Manager** | Block/whitelist individual IPs manually. All blocked IPs are enforced across ALL campaign click checks |
 | 📂 **Dataset Upload** | Upload CSV, JSON, or TXT files of IPs to bulk-populate block or whitelist. Supports training datasets too |
-| 🔌 **Platform Events API** | `POST /campaigns/{id}/platform-event` — record real or simulated Google/Facebook ad events |
+| 🔌 **Platform Events API** | `POST /campaigns/{id}/platform-event` — record supplied Google/Facebook event data; no provider integration is implemented |
 | 🗄️ **3 new DB tables** | `ip_lists`, `ip_datasets`, `ip_dataset_rows`, `platform_events` |
 
 ---
@@ -19,42 +19,13 @@
 ## Project Structure
 
 ```
-adshield-v3/
-├── backend/
-│   ├── main.py           # FastAPI — 30+ endpoints
-│   ├── model.py          # XGBoost training & inference
-│   ├── database.py       # SQLite — 9 tables
-│   ├── auth.py           # JWT + bcrypt
-│   └── preprocess.py     # Feature engineering
-│
-├── frontend/
-│   ├── app.py            # Streamlit entry (8 pages)
-│   ├── pages/
-│   │   ├── dashboard.py
-│   │   ├── realtime_monitor.py   ← NEW
-│   │   ├── campaigns.py
-│   │   ├── campaign_detail.py
-│   │   ├── ip_manager.py         ← NEW
-│   │   ├── predict.py
-│   │   ├── analytics.py
-│   │   ├── history.py
-│   │   ├── login.py
-│   │   ├── signup.py
-│   │   └── about.py
-│   └── components/
-│       ├── api.py        # All API helpers (v3 extended)
-│       ├── charts.py
-│       └── styles.py
-│
-├── models/
-│   ├── model.pkl
-│   └── encoder.pkl
-│
-├── data/
-│   ├── dataset.csv
-│   └── generate_dataset.py
-│
-└── requirements.txt
+backend/       FastAPI, auth, persistence, scoring services
+frontend/      Streamlit pages and API client
+data/          Synthetic sample data and generator
+ml/            Offline training, monitoring, retention
+migrations/    Alembic PostgreSQL schema history
+docs/          Architecture, model card, deployment, runbook
+docker/        API image; Compose starts local PostgreSQL and UI
 ```
 
 ---
@@ -68,9 +39,10 @@ pip install -r requirements.txt
 
 ### 2. Start the FastAPI backend
 ```bash
+export JWT_SECRET="replace-with-a-random-value-of-at-least-32-characters"
 uvicorn backend.main:app --reload
 ```
-API: `http://localhost:8000` · Docs: `http://localhost:8000/docs`
+API: `http://localhost:8000` · Docs: `http://localhost:8000/docs`. Local mode uses SQLite. To run PostgreSQL, set `DATABASE_URL` and apply `alembic upgrade head` first.
 
 ### 3. Launch Streamlit dashboard
 ```bash

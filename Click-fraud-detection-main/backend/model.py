@@ -3,32 +3,7 @@ model.py
 XGBoost model training, evaluation, and inference.
 """
 import os
-import sys
 import pickle
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import GradientBoostingClassifier   # fallback if xgboost missing
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import (accuracy_score, precision_score,
-                             recall_score, f1_score, classification_report)
-
-# Try XGBoost first, fall back to sklearn GBM
-try:
-    from xgboost import XGBClassifier
-    USE_XGB = True
-except ImportError:
-    USE_XGB = False
-    print("[WARN] xgboost not installed - using sklearn GradientBoostingClassifier as fallback.")
-
-# Try SMOTE
-try:
-    from imblearn.over_sampling import SMOTE
-    HAS_SMOTE = True
-except ImportError:
-    HAS_SMOTE = False
-
-sys.path.insert(0, os.path.dirname(__file__))
-from preprocess import preprocess_training_data, preprocess_single
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +24,23 @@ def get_scale_pos_weight(y):
 def train_model(use_smote: bool = False) -> dict:
     """Train model from dataset.csv. Returns evaluation metrics dict."""
     global _metrics
+    import pandas as pd
+    from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.metrics import accuracy_score, classification_report, f1_score, precision_score, recall_score
+    from sklearn.model_selection import train_test_split
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from preprocess import preprocess_training_data
+    try:
+        from xgboost import XGBClassifier
+        use_xgb = True
+    except ImportError:
+        use_xgb = False
+    try:
+        from imblearn.over_sampling import SMOTE
+        has_smote = True
+    except ImportError:
+        has_smote = False
 
     if not os.path.exists(DATA_PATH):
         raise FileNotFoundError(
@@ -67,12 +59,12 @@ def train_model(use_smote: bool = False) -> dict:
     )
 
     # Handle class imbalance
-    if use_smote and HAS_SMOTE:
+    if use_smote and has_smote:
         print("[INFO] Applying SMOTE...")
         sm = SMOTE(random_state=42)
         X_train, y_train = sm.fit_resample(X_train, y_train)
         spw = 1.0
-    elif use_smote and not HAS_SMOTE:
+    elif use_smote and not has_smote:
         print("[WARN] imbalanced-learn not installed; using scale_pos_weight instead.")
         spw = get_scale_pos_weight(y_train)
     else:
@@ -80,7 +72,7 @@ def train_model(use_smote: bool = False) -> dict:
         print(f"[INFO] scale_pos_weight = {spw:.2f}")
 
     # Build model
-    if USE_XGB:
+    if use_xgb:
         model = XGBClassifier(
             n_estimators=200,
             max_depth=6,
@@ -126,22 +118,30 @@ def train_model(use_smote: bool = False) -> dict:
 
 
 def load_model():
-    """Load saved model from disk."""
-    if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(
-            f"Model not found at {MODEL_PATH}. Train the model first via POST /train."
-        )
-    with open(MODEL_PATH, "rb") as f:
-        return pickle.load(f)
+    """Return the process-cached native XGBoost model, if configured and available."""
+    from app.services.scoring import _load_model
+    model = _load_model()
+    if model is None:
+        raise FileNotFoundError("No pinned model artifact is available")
+    return model
 
 
 def predict_single(record: dict) -> dict:
-    """Run inference on one click record. Returns prediction + confidence."""
-    model = load_model()
-    X = preprocess_single(record)
-    prob  = float(model.predict_proba(X)[0][1])
-    label = "Fraud" if prob >= 0.5 else "Legit"
-    return {"prediction": label, "confidence": round(prob, 4)}
+    """Shared online score path, with a documented rules-only fallback."""
+    from app.services.decision import decide
+    from app.services.features import build_features
+    from app.services.scoring import score
+    features = build_features(
+        ip_click_count=record.get("ip_click_count", 0),
+        click_interval=record.get("click_interval", 0),
+        user_agent=record.get("user_agent", ""),
+    )
+    result = score(features)
+    action = decide(result["score"])
+    return {"prediction": "Fraud" if action == "BLOCK" else "Legit" if action == "ALLOW" else "Review",
+        "confidence": round(result["score"], 4), "decision": action,
+        "model_version": result["model_version"], "reason_codes": result["reason_codes"],
+        "degraded": result["degraded"]}
 
 
 def get_metrics() -> dict:

@@ -47,3 +47,15 @@
 ### D011: CORS origins from environment (no wildcard in production)
 **Decision**: `CORS_ORIGINS` read from env var, split on commas. Default is `http://localhost:8501`.  
 **Rationale**: Original `allow_origins=["*"]` allows any website to make authenticated requests to the API. In production, only the Streamlit Cloud domain should be allowed.
+
+### D012: Versioned routes are compatibility aliases
+**Decision**: Expose `/api/v1` aliases while keeping existing paths for the Streamlit client migration.
+**Rationale**: This adds a stable versioned path without requiring a synchronized UI cutover.
+
+### D013: Keep the runtime on PostgreSQL in production and SQLite for tests
+**Decision**: Select the SQLAlchemy PostgreSQL adapter from `DATABASE_URL`; leave local tests on temporary SQLite databases.
+**Rationale**: Production needs managed persistent storage, while SQLite keeps tests deterministic and self-contained.
+
+### D014: Select model threshold from validation costs
+**Decision**: Choose the binary operating threshold from `C_FP` and `C_FN` on a separate time-ordered validation slice; report review and block thresholds separately.
+**Rationale**: Under the binary Bayes decision model, the cost-sensitive threshold is `C_fp / (C_fp + C_fn)`.

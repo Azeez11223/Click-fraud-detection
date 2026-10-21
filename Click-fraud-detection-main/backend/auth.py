@@ -105,6 +105,9 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     user_id = payload.get("user_id")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")
+    from database import get_user_by_id
+    if not get_user_by_id(user_id):
+        raise HTTPException(status_code=401, detail="Account is no longer active")
     return {"user_id": user_id}
 
 

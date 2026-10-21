@@ -21,7 +21,7 @@ def render():
         st.markdown("""
         <div style="font-size:0.9rem; color:#8b9bbf; line-height:1.8;">
             <p>
-                <strong style="color:#c9d1e0;">AdShield</strong> is a production-grade click fraud detection platform
+                <strong style="color:#c9d1e0;">AdShield</strong> is a click fraud detection prototype
                 built for ad-tech operations. It uses machine learning to identify fraudulent ad clicks in real-time,
                 protecting advertisers from wasted budget and inflated metrics.
             </p>

@@ -28,6 +28,17 @@ def _get_api_base() -> str:
 API_BASE = _get_api_base()
 
 
+def _response_payload(response):
+    """Decode JSON and keep a useful message for legacy Streamlit pages."""
+    try:
+        payload = response.json()
+    except requests.exceptions.JSONDecodeError:
+        payload = {"detail": "API returned an invalid response"}
+    if isinstance(payload, dict) and "error" in payload:
+        payload.setdefault("detail", payload["error"].get("message", "Request failed"))
+    return payload
+
+
 def get_auth_headers():
     t = st.session_state.get("token")
     return {"Authorization": f"Bearer {t}"} if t else {}
@@ -63,7 +74,7 @@ def _post(path, payload=None, params=None, auth=False, timeout=10):
             headers=headers,
             timeout=timeout,
         )
-        return r.json(), r.status_code
+        return _response_payload(r), r.status_code
     except requests.exceptions.ConnectionError:
         return {"detail": "Cannot connect to API"}, 503
     except requests.exceptions.Timeout:
@@ -75,7 +86,7 @@ def _post(path, payload=None, params=None, auth=False, timeout=10):
 def _delete(path, auth=True, timeout=10):
     try:
         r = requests.delete(f"{API_BASE}{path}", headers=get_auth_headers(), timeout=timeout)
-        return r.json(), r.status_code
+        return _response_payload(r), r.status_code
     except requests.exceptions.ConnectionError:
         return {"detail": "Cannot connect to API"}, 503
     except requests.exceptions.Timeout:
@@ -92,7 +103,7 @@ def _patch(path, params=None, auth=True, timeout=10):
             headers=get_auth_headers(),
             timeout=timeout,
         )
-        return r.json(), r.status_code
+        return _response_payload(r), r.status_code
     except requests.exceptions.ConnectionError:
         return {"detail": "Cannot connect to API"}, 503
     except requests.exceptions.Timeout:

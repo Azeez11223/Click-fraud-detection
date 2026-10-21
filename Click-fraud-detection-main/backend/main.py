@@ -9,38 +9,79 @@ FastAPI backend with security hardening:
   - CORS origins from env (no wildcard in production)
   - /docs disabled in production
 """
-import os
-import sys
-import json
 import ipaddress as _ipaddress
-from typing import Optional
-from fastapi import FastAPI, HTTPException, Query, Depends, UploadFile, File, Form, Request
+import json
+import logging
+import os
+import re
+import sys
+import time
+import uuid
+from collections import Counter, deque
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, EmailStr, field_validator
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from starlette.responses import JSONResponse
 
 sys.path.insert(0, os.path.dirname(__file__))
-from database import (
-    init_db, insert_click, insert_prediction, get_recent_predictions, get_prediction_stats,
-    insert_user, get_user_by_email, get_user_by_id,
-    insert_campaign, get_campaigns_by_user, get_campaign_by_id, update_campaign_status, delete_campaign,
-    insert_campaign_click, get_campaign_clicks, get_campaign_click_stats, check_campaign_alerts,
-    get_campaign_owner_id, validate_ip,
-    # NEW v3
-    upsert_ip, delete_ip, get_ip_list, get_ip_list_counts,
-    insert_ip_dataset, get_ip_datasets, delete_ip_dataset,
-    insert_platform_event, get_platform_events, get_platform_stats,
-    get_realtime_feed, get_hourly_platform_breakdown,
-)
-from model import predict_single, get_metrics
 from auth import (
-    hash_password, verify_password, create_access_token, get_current_user,
-    get_admin_user, validate_jwt_config,
-    generate_api_key, hash_api_key, verify_api_key,
+    create_access_token,
+    generate_api_key,
+    get_admin_user,
+    get_current_user,
+    hash_api_key,
+    hash_password,
+    validate_jwt_config,
+    verify_api_key,
+    verify_password,
 )
+from database import (
+    check_campaign_alerts,
+    delete_campaign,
+    delete_ip,
+    delete_ip_dataset,
+    delete_user_data,
+    get_campaign_by_id,
+    get_campaign_click_stats,
+    get_campaign_clicks,
+    get_campaign_owner_id,
+    get_campaigns_by_user,
+    get_click_features,
+    get_hourly_platform_breakdown,
+    get_ip_datasets,
+    get_ip_list,
+    get_ip_list_counts,
+    get_platform_events,
+    get_platform_stats,
+    get_prediction_stats,
+    get_realtime_feed,
+    get_recent_predictions,
+    get_user_by_email,
+    get_user_by_id,
+    get_audit_events,
+    init_db,
+    insert_campaign,
+    insert_campaign_click,
+    insert_click,
+    insert_ip_dataset,
+    insert_platform_event,
+    insert_prediction,
+    insert_user,
+    record_audit_event,
+    update_campaign_status,
+    # NEW v3
+    upsert_ip,
+    validate_ip,
+)
+from model import get_metrics, predict_single
 
 # ── Environment ────────────────────────────────────────────────────────────────
 ENV = os.environ.get("ENV", "development")
@@ -54,6 +95,10 @@ CORS_ORIGINS = [
 # Max upload size for IP datasets (bytes)
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 MB
 MAX_UPLOAD_ROWS = 50_000
+AUTH_RATE_LIMIT = os.getenv("AUTH_RATE_LIMIT", "5/minute")
+INGEST_RATE_LIMIT = os.getenv("INGEST_RATE_LIMIT", "60/minute")
+UPLOAD_RATE_LIMIT = os.getenv("UPLOAD_RATE_LIMIT", "5/minute")
+_LOGIN_FAILURES: dict[str, list[float]] = {}
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 app_kwargs = {"title": "AdShield API v3", "version": "3.0.0"}
@@ -61,7 +106,75 @@ if IS_PRODUCTION:
     # Disable interactive docs in production
     app_kwargs.update({"docs_url": None, "redoc_url": None, "openapi_url": None})
 
-app = FastAPI(**app_kwargs)
+logger = logging.getLogger("adshield.api")
+_request_counts = Counter()
+_request_latencies = deque(maxlen=5000)
+
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record):
+        details = getattr(record, "details", {})
+        return json.dumps({"timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname.lower(), "message": record.getMessage(), **details})
+
+
+if not logger.handlers:
+    _log_handler = logging.StreamHandler(sys.stdout)
+    _log_handler.setFormatter(_JsonFormatter())
+    logger.addHandler(_log_handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
+@asynccontextmanager
+async def lifespan(application):
+    validate_jwt_config()
+    if IS_PRODUCTION and not os.environ.get("DATABASE_URL"):
+        raise RuntimeError("DATABASE_URL must point to PostgreSQL in production")
+    if IS_PRODUCTION and "*" in CORS_ORIGINS:
+        raise RuntimeError("Wildcard CORS origins are not allowed in production")
+    init_db()
+    if os.getenv("SENTRY_DSN"):
+        import sentry_sdk
+        sentry_sdk.init(dsn=os.environ["SENTRY_DSN"], send_default_pii=False, traces_sample_rate=0.0)
+    try:
+        from app.services.scoring import _load_model
+        if _load_model() is None:
+            logger.warning("model artifact unavailable; serving in rules-only mode")
+    except Exception:
+        logger.warning("model artifact unavailable; serving in rules-only mode")
+    yield
+
+
+app = FastAPI(lifespan=lifespan, **app_kwargs)
+
+
+@app.middleware("http")
+async def request_logging(request: Request, call_next):
+    candidate_id = request.headers.get("X-Request-ID", "")
+    request_id = candidate_id if len(candidate_id) <= 128 and re.fullmatch(r"[A-Za-z0-9._-]+", candidate_id) else str(uuid.uuid4())
+    started = time.perf_counter()
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    latency_ms = round((time.perf_counter()-started)*1000, 2)
+    route = request.scope.get("route")
+    endpoint = getattr(route, "path", "unknown")
+    _request_counts[f"{request.method} {endpoint} {response.status_code}"] += 1
+    _request_latencies.append(latency_ms)
+    user_id = None
+    authorization = request.headers.get("Authorization", "")
+    if authorization.lower().startswith("bearer "):
+        try:
+            from auth import decode_access_token
+            user_id = decode_access_token(authorization[7:]).get("user_id")
+        except Exception:
+            user_id = None
+    logger.info("request complete", extra={"details": {"request_id": request_id,
+        "endpoint": endpoint, "user_id": user_id, "status": response.status_code,
+        "latency_ms": latency_ms, "model_version": getattr(request.state, "model_version", None),
+        "score": getattr(request.state, "score", None), "decision": getattr(request.state, "decision", None)}})
+    return response
 
 # Rate limiter (in-memory, single instance — works without Redis)
 limiter = Limiter(key_func=get_remote_address)
@@ -72,8 +185,24 @@ app.state.limiter = limiter
 async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
     return JSONResponse(
         status_code=429,
-        content={"detail": "Too many requests. Please slow down."},
+        content={"error": {"code": "rate_limited", "message": "Too many requests. Please slow down.",
+            "request_id": getattr(request.state, "request_id", None)}},
     )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(request: Request, exc: StarletteHTTPException):
+    message = exc.detail if isinstance(exc.detail, str) else "Request failed"
+    return JSONResponse(status_code=exc.status_code, headers=exc.headers, content={
+        "error": {"code": f"http_{exc.status_code}", "message": message,
+            "request_id": getattr(request.state, "request_id", None)}})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"error": {
+        "code": "validation_error", "message": "Request validation failed",
+        "request_id": getattr(request.state, "request_id", None)}})
 
 
 app.add_middleware(
@@ -85,21 +214,15 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-def startup():
-    validate_jwt_config()
-    init_db()
-
-
 # ── Schemas ────────────────────────────────────────────────────────────────────
 class ClickRequest(BaseModel):
     ip_address: str
     device_type: str
     browser: str
     timestamp: str
-    click_interval: float = Field(..., ge=0)
-    ip_click_count: int = Field(..., ge=0)
     geo_location: str
+    user_agent: str = Field(default="", max_length=512)
+    event_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @field_validator("ip_address")
     @classmethod
@@ -168,14 +291,15 @@ class CampaignRequest(BaseModel):
 
 class CampaignClickRequest(BaseModel):
     """Click ingest schema — IP is derived from request.client.host, not from body."""
-    user_agent: str = ""
+    user_agent: str = Field(default="", max_length=512)
+    event_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 # ── NEW v3 Schemas ─────────────────────────────────────────────────────────────
 class IPEntryRequest(BaseModel):
     ip_address: str = Field(..., examples=["203.45.67.89"])
     list_type: str = Field(..., examples=["block"])
-    note: str = ""
+    note: str = Field(default="", max_length=500)
 
     @field_validator("ip_address")
     @classmethod
@@ -202,6 +326,7 @@ class PlatformEventRequest(BaseModel):
     device: str = ""
     browser: str = ""
     cost_usd: float = 0.0
+    event_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @field_validator("ip_address")
     @classmethod
@@ -221,37 +346,62 @@ class PlatformEventRequest(BaseModel):
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
-@app.get("/", tags=["Health"])
-def root():
-    return {"status": "running", "api": "AdShield v3.0"}
-
-
 @app.get("/healthz", tags=["Health"])
 def healthz():
     """Liveness probe — no DB call."""
     return {"status": "ok"}
 
 
+@app.get("/readyz", tags=["Health"])
+def readyz():
+    """Readiness probe reports database and model availability."""
+    db_ok = False
+    try:
+        conn = __import__("database").get_connection()
+        conn.execute("SELECT 1").fetchone()
+        conn.close()
+        db_ok = True
+    except Exception:
+        logger.warning("database readiness check failed")
+    try:
+        from app.services.scoring import _load_model
+        model_ok = _load_model() is not None
+    except Exception:
+        model_ok = False
+    status = "ready" if db_ok and model_ok else "degraded"
+    return JSONResponse(status_code=503 if not db_ok else 200, content={
+        "status": status, "database": db_ok,
+        "model": "available" if model_ok else "rules-only"})
+
+
 # ── Prediction ─────────────────────────────────────────────────────────────────
 @app.post("/predict", tags=["Prediction"])
-def predict(click: ClickRequest, user=Depends(get_current_user)):
+@limiter.limit(INGEST_RATE_LIMIT)
+def predict(click: ClickRequest, request: Request, user=Depends(get_current_user)):
+    ip_count, click_interval = get_click_features(click.ip_address, user["user_id"])
     record = click.model_dump()
+    record.update({"ip_click_count": ip_count, "click_interval": click_interval})
     try:
         result = predict_single(record)
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         raise HTTPException(503, "Model not available")
     except Exception:
         raise HTTPException(500, "Prediction error")
+    request.state.model_version = result.get("model_version")
+    request.state.score = result.get("confidence")
+    request.state.decision = result.get("decision")
 
     try:
         insert_click(
             click.ip_address, click.device_type, click.browser, click.geo_location,
-            click.timestamp, click.click_interval, click.ip_click_count, user_id=user["user_id"],
+            click.timestamp, click_interval, ip_count, user_id=user["user_id"], event_id=click.event_id,
         )
-        insert_prediction(click.ip_address, result["prediction"], result["confidence"], user_id=user["user_id"])
-    except Exception as e:
-        # Log but don't swallow — return the prediction but note the DB error
-        print(f"[ERROR] DB write failed in /predict: {e}")
+        insert_prediction(click.ip_address, result["prediction"], result["confidence"], user_id=user["user_id"],
+            decision=result.get("decision"), reason_codes=result.get("reason_codes"),
+            model_version=result.get("model_version"), event_id=click.event_id)
+    except Exception:
+        logger.error("prediction persistence failed", extra={"details": {"request_id": request.state.request_id}})
+        raise HTTPException(503, "Prediction could not be stored")
 
     return result
 
@@ -273,22 +423,13 @@ def fraud_stats(user=Depends(get_current_user)):
 
 # ── Train (admin-only, disabled in production) ────────────────────────────────
 @app.post("/train", tags=["Model"])
-def train(use_smote: bool = Query(default=False), user=Depends(get_admin_user)):
-    if IS_PRODUCTION:
-        raise HTTPException(403, "Training is disabled in production. Use offline training pipeline.")
-    # Import here to avoid loading training deps in production
-    from model import train_model
-    try:
-        return {"status": "trained", "metrics": train_model(use_smote=use_smote)}
-    except FileNotFoundError as e:
-        raise HTTPException(404, "Dataset not found")
-    except Exception:
-        raise HTTPException(500, "Training error")
+def train(user=Depends(get_admin_user)):
+    raise HTTPException(410, "Model training runs offline with `python -m ml.train`.")
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 @app.post("/auth/signup", tags=["Auth"])
-@limiter.limit("5/minute")
+@limiter.limit(AUTH_RATE_LIMIT)
 def signup(req: SignupRequest, request: Request):
     hashed = hash_password(req.password)
     uid = insert_user(req.name, req.email, hashed)
@@ -298,11 +439,23 @@ def signup(req: SignupRequest, request: Request):
 
 
 @app.post("/auth/login", tags=["Auth"])
-@limiter.limit("5/minute")
+@limiter.limit(AUTH_RATE_LIMIT)
 def login(req: LoginRequest, request: Request):
+    if len(_LOGIN_FAILURES) > 10_000:
+        cutoff = time.time() - 900
+        for key in [key for key, values in _LOGIN_FAILURES.items() if not values or max(values) < cutoff]:
+            _LOGIN_FAILURES.pop(key, None)
+    key = f"{get_remote_address(request)}:{req.email.lower()}"
+    now = time.time()
+    failures = [moment for moment in _LOGIN_FAILURES.get(key, []) if now - moment < 900]
+    if len(failures) >= 5:
+        raise HTTPException(429, "Too many failed sign-in attempts. Try again later.")
     user = get_user_by_email(req.email)
     if not user or not verify_password(req.password, user["password_hash"]):
+        failures.append(now)
+        _LOGIN_FAILURES[key] = failures
         raise HTTPException(401, "Invalid email or password")
+    _LOGIN_FAILURES.pop(key, None)
     token = create_access_token(user["id"])
     return {
         "access_token": token,
@@ -319,10 +472,18 @@ def me(user=Depends(get_current_user)):
     return db_user
 
 
+@app.delete("/account", tags=["Privacy"])
+def delete_account(user=Depends(get_current_user)):
+    if not delete_user_data(user["user_id"]):
+        raise HTTPException(404, "Account not found")
+    return {"message": "Account and associated data deleted"}
+
+
 # ── Campaigns ──────────────────────────────────────────────────────────────────
 @app.get("/campaigns", tags=["Campaigns"])
-def list_campaigns(user=Depends(get_current_user)):
-    return get_campaigns_by_user(user["user_id"])
+def list_campaigns(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                   user=Depends(get_current_user)):
+    return get_campaigns_by_user(user["user_id"], limit, offset)
 
 
 @app.post("/campaigns", tags=["Campaigns"])
@@ -374,7 +535,7 @@ def _get_campaign_api_key(request: Request) -> str:
 
 
 @app.post("/campaigns/{campaign_id}/click", tags=["Campaign Clicks"])
-@limiter.limit("60/minute")
+@limiter.limit(INGEST_RATE_LIMIT)
 def record_click(campaign_id: int, req: CampaignClickRequest, request: Request):
     """Record a campaign click.
     - Requires X-API-Key header matching the campaign's API key.
@@ -392,16 +553,25 @@ def record_click(campaign_id: int, req: CampaignClickRequest, request: Request):
 
     # Derive IP from the actual network connection
     client_ip = request.client.host if request.client else "0.0.0.0"
+    try:
+        client_ip = validate_ip(client_ip)
+    except ValueError:
+        raise HTTPException(400, "Client IP address is invalid")
     owner_user_id = campaign_info["user_id"]
 
-    return insert_campaign_click(campaign_id, client_ip, req.user_agent, user_id=owner_user_id)
+    result = insert_campaign_click(campaign_id, client_ip, req.user_agent, user_id=owner_user_id, event_id=req.event_id)
+    request.state.model_version = result.get("model_version")
+    request.state.score = result.get("score")
+    request.state.decision = result.get("decision")
+    return result
 
 
 @app.get("/campaigns/{campaign_id}/clicks", tags=["Campaign Clicks"])
-def get_clicks(campaign_id: int, limit: int = Query(100, le=500), user=Depends(get_current_user)):
+def get_clicks(campaign_id: int, limit: int = Query(100, ge=1, le=500),
+               offset: int = Query(0, ge=0), user=Depends(get_current_user)):
     if not get_campaign_by_id(campaign_id, user["user_id"]):
         raise HTTPException(404, "not found")
-    return get_campaign_clicks(campaign_id, limit)
+    return get_campaign_clicks(campaign_id, limit, offset)
 
 
 @app.get("/campaigns/{campaign_id}/stats", tags=["Campaign Clicks"])
@@ -423,9 +593,10 @@ def get_alerts(campaign_id: int, user=Depends(get_current_user)):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/ip-lists", tags=["IP Lists"])
-def list_ips(list_type: Optional[str] = None, user=Depends(get_current_user)):
+def list_ips(list_type: str | None = None, limit: int = Query(100, ge=1, le=500),
+             offset: int = Query(0, ge=0), user=Depends(get_current_user)):
     """Return all blocked/whitelisted IPs for the current user."""
-    return get_ip_list(user["user_id"], list_type)
+    return get_ip_list(user["user_id"], list_type, limit, offset)
 
 
 @app.get("/ip-lists/counts", tags=["IP Lists"])
@@ -436,12 +607,20 @@ def ip_counts(user=Depends(get_current_user)):
 @app.post("/ip-lists", tags=["IP Lists"])
 def add_ip_entry(req: IPEntryRequest, user=Depends(get_current_user)):
     rid = upsert_ip(user["user_id"], req.ip_address, req.list_type, req.note)
+    record_audit_event(user["user_id"], "ip_list.upsert", "ip_list_entry", rid,
+                       {"list_type": req.list_type})
     return {"message": "IP added", "id": rid, "ip": req.ip_address, "list_type": req.list_type}
 
 
 @app.delete("/ip-lists/{ip_address:path}", tags=["IP Lists"])
 def remove_ip_entry(ip_address: str, user=Depends(get_current_user)):
-    delete_ip(user["user_id"], ip_address)
+    try:
+        ip_address = validate_ip(ip_address)
+    except ValueError:
+        raise HTTPException(400, "Invalid IP address")
+    deleted_id = delete_ip(user["user_id"], ip_address)
+    if deleted_id is not None:
+        record_audit_event(user["user_id"], "ip_list.delete", "ip_list_entry", deleted_id)
     return {"message": f"IP {ip_address} removed"}
 
 
@@ -450,7 +629,9 @@ def remove_ip_entry(ip_address: str, user=Depends(get_current_user)):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/ip-datasets/upload", tags=["IP Datasets"])
+@limiter.limit(UPLOAD_RATE_LIMIT)
 async def upload_dataset(
+    request: Request,
     file: UploadFile = File(...),
     list_type: str = Form(...),
     user=Depends(get_current_user),
@@ -513,6 +694,8 @@ async def upload_dataset(
         raise HTTPException(400, f"Too many IPs. Maximum {MAX_UPLOAD_ROWS:,} rows per upload.")
 
     dataset_id, inserted, skipped, invalid = insert_ip_dataset(user["user_id"], filename, list_type, ips)
+    record_audit_event(user["user_id"], "ip_dataset.upload", "ip_dataset", dataset_id,
+                       {"list_type": list_type, "rows": len(ips)})
     return {
         "message": "Dataset uploaded",
         "dataset_id": dataset_id,
@@ -524,8 +707,9 @@ async def upload_dataset(
 
 
 @app.get("/ip-datasets", tags=["IP Datasets"])
-def list_datasets(user=Depends(get_current_user)):
-    return get_ip_datasets(user["user_id"])
+def list_datasets(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                  user=Depends(get_current_user)):
+    return get_ip_datasets(user["user_id"], limit, offset)
 
 
 @app.delete("/ip-datasets/{dataset_id}", tags=["IP Datasets"])
@@ -533,6 +717,7 @@ def del_dataset(dataset_id: int, user=Depends(get_current_user)):
     deleted = delete_ip_dataset(dataset_id, user["user_id"])
     if not deleted:
         raise HTTPException(404, "Dataset not found or not owned by you")
+    record_audit_event(user["user_id"], "ip_dataset.delete", "ip_dataset", dataset_id)
     return {"message": "Dataset deleted and IPs removed from list"}
 
 
@@ -541,24 +726,30 @@ def del_dataset(dataset_id: int, user=Depends(get_current_user)):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.post("/campaigns/{campaign_id}/platform-event", tags=["Platform"])
-def platform_event(campaign_id: int, req: PlatformEventRequest, user=Depends(get_current_user)):
+@limiter.limit(INGEST_RATE_LIMIT)
+def platform_event(campaign_id: int, req: PlatformEventRequest, request: Request, user=Depends(get_current_user)):
     """Record a Google / Facebook ad event for a campaign."""
     campaign = get_campaign_by_id(campaign_id, user["user_id"])
     if not campaign:
         raise HTTPException(404, "Campaign not found")
-    return insert_platform_event(
+    result = insert_platform_event(
         campaign_id=campaign_id, platform=req.platform, event_type=req.event_type,
         ip_address=req.ip_address, country=req.country, device=req.device,
-        browser=req.browser, cost_usd=req.cost_usd, user_id=user["user_id"],
+        browser=req.browser, cost_usd=req.cost_usd, user_id=user["user_id"], event_id=req.event_id,
     )
+    request.state.model_version = result.get("model_version")
+    request.state.score = result.get("score")
+    request.state.decision = result.get("decision")
+    return result
 
 
 @app.get("/campaigns/{campaign_id}/platform-events", tags=["Platform"])
-def list_platform_events(campaign_id: int, limit: int = Query(200, le=500),
-                         platform: Optional[str] = None, user=Depends(get_current_user)):
+def list_platform_events(campaign_id: int, limit: int = Query(200, ge=1, le=500),
+                         offset: int = Query(0, ge=0),
+                         platform: str | None = None, user=Depends(get_current_user)):
     if not get_campaign_by_id(campaign_id, user["user_id"]):
         raise HTTPException(404, "not found")
-    return get_platform_events(campaign_id, limit, platform)
+    return get_platform_events(campaign_id, limit, platform, offset)
 
 
 @app.get("/campaigns/{campaign_id}/platform-stats", tags=["Platform"])
@@ -580,3 +771,35 @@ def hourly(campaign_id: int, hours: int = Query(24, le=168), user=Depends(get_cu
     if not get_campaign_by_id(campaign_id, user["user_id"]):
         raise HTTPException(404, "not found")
     return get_hourly_platform_breakdown(campaign_id, hours)
+
+
+@app.get("/api/v1/admin/stats", tags=["Admin"])
+def admin_stats(user=Depends(get_admin_user)):
+    latencies = sorted(_request_latencies)
+    def percentile(fraction):
+        return latencies[min(len(latencies) - 1, int((len(latencies) - 1) * fraction))] if latencies else 0.0
+    return {"request_counts": dict(_request_counts), "latency_ms": {
+        "samples": len(latencies), "p50": percentile(.50), "p95": percentile(.95),
+        "max": latencies[-1] if latencies else 0.0}}
+
+
+@app.get("/api/v1/admin/audit-events", tags=["Admin"])
+def admin_audit_events(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    user=Depends(get_admin_user),
+):
+    """Return paginated audit records without raw IP addresses."""
+    return get_audit_events(limit=limit, offset=offset)
+
+
+# Versioned aliases are introduced without breaking the existing Streamlit client.
+# Existing routes remain available as compatibility paths during migration.
+from fastapi.routing import APIRoute
+
+for _route in list(app.routes):
+    if isinstance(_route, APIRoute) and _route.path.startswith("/") and not _route.path.startswith("/api/v1/"):
+        if _route.path not in {"/", "/openapi.json", "/docs", "/redoc"}:
+            app.add_api_route("/api/v1" + _route.path, _route.endpoint,
+                methods=list(_route.methods or []), name="v1_" + _route.name,
+                response_model=_route.response_model, include_in_schema=True)

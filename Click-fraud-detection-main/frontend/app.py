@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 import streamlit as st
 from components.styles import GLOBAL_CSS
-from components.api import check_api_health, api_post
+from components.api import check_api_health
 
 st.set_page_config(
     page_title="AdShield — Click Fraud Detection",
@@ -92,24 +92,10 @@ else:
             st.session_state.page = sel
             if sel != "Campaigns": st.session_state.selected_campaign_id = None
 
-        # Model training
+        # Model training is offline; the API never trains or writes model artifacts.
         st.markdown('<div style="border-top:1px solid rgba(255,255,255,0.05);margin:20px 0 16px 0;padding-top:16px;"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="section-label" style="padding-left:16px;">Model Training</div>', unsafe_allow_html=True)
-        use_smote = st.checkbox("Use SMOTE balancing", value=False, key="use_smote")
-        if st.button("⚡ Train Model", use_container_width=True):
-            with st.spinner("Training XGBoost model…"):
-                result, code = api_post("/train", params={"use_smote": str(use_smote).lower()})
-            if code == 200:
-                m = result.get("metrics", {})
-                st.success("Model trained!")
-                st.markdown(f'<div class="card" style="margin-top:8px;padding:14px;">'
-                            f'<div class="stat-row"><span class="stat-label">Accuracy</span><span class="stat-value">{m.get("accuracy",0)*100:.1f}%</span></div>'
-                            f'<div class="stat-row"><span class="stat-label">Precision</span><span class="stat-value">{m.get("precision",0)*100:.1f}%</span></div>'
-                            f'<div class="stat-row"><span class="stat-label">Recall</span><span class="stat-value">{m.get("recall",0)*100:.1f}%</span></div>'
-                            f'<div class="stat-row"><span class="stat-label">F1</span><span class="stat-value">{m.get("f1_score",0)*100:.1f}%</span></div>'
-                            f'</div>', unsafe_allow_html=True)
-            else:
-                st.error(result.get("detail","Training failed"))
+        st.markdown('<div class="section-label" style="padding-left:16px;">Offline Model Training</div>', unsafe_allow_html=True)
+        st.caption("Train and publish model artifacts outside the API using the documented workflow.")
 
         # Logout
         st.markdown('<div style="border-top:1px solid rgba(255,255,255,0.05);margin:20px 0 12px 0;padding-top:12px;"></div>', unsafe_allow_html=True)

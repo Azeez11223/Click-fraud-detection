@@ -46,8 +46,8 @@ def init_database():
 
 @pytest.fixture(scope="session")
 def client():
-    """Shared test client."""
-    return TestClient(app)
+    """Shared test client with a valid simulated TCP peer address."""
+    return TestClient(app, client=("192.0.2.10", 12345))
 
 
 @pytest.fixture(scope="session")

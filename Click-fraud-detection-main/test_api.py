@@ -4,7 +4,7 @@ import requests
 BASE = "http://localhost:8000"
 
 print("=== Health ===")
-r = requests.get(f"{BASE}/")
+r = requests.get(f"{BASE}/healthz", timeout=5)
 print(r.json())
 
 print("\n=== Signup ===")

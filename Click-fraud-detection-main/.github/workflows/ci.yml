@@ -1,0 +1,58 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: adshield
+          POSTGRES_PASSWORD: adshield
+          POSTGRES_DB: adshield
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U adshield" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check backend/app ml migrations data/generate_dataset.py tests/test_scoring_services.py tests/test_postgres_smoke.py
+      - run: ruff check backend/main.py backend/database.py backend/model.py --select E9,F
+      - run: pytest
+        env:
+          JWT_SECRET: ci-test-secret-at-least-32-characters
+      - name: Apply Postgres schema
+        run: alembic upgrade head
+        env:
+          DATABASE_URL: postgresql://adshield:adshield@localhost:5432/adshield
+      - name: Postgres smoke test
+        run: pytest -q tests/test_postgres_smoke.py
+        env:
+          JWT_SECRET: ci-test-secret-at-least-32-characters
+          DATABASE_URL: postgresql://adshield:adshield@localhost:5432/adshield
+      - run: pip-audit -r requirements.txt
+      - run: docker build -f docker/Dockerfile.api -t adshield-api .
+      - name: Scan API image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: adshield-api
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+      - name: Verify deployed service
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.RENDER_SERVICE_URL != '' }}
+        env:
+          SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
+        run: |
+          curl --fail --retry 12 --retry-delay 10 "$SERVICE_URL/healthz"
+          curl --fail --retry 12 --retry-delay 10 "$SERVICE_URL/readyz"

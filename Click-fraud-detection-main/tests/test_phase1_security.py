@@ -256,9 +256,9 @@ class TestUnauthenticatedEndpoints:
 class TestHealthEndpoints:
     """Health endpoints should not require auth."""
 
-    def test_root_no_auth(self, client):
+    def test_root_is_not_a_public_data_endpoint(self, client):
         r = client.get("/")
-        assert r.status_code == 200
+        assert r.status_code == 404
 
     def test_healthz_no_auth(self, client):
         r = client.get("/healthz")

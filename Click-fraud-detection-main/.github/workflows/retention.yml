@@ -1,0 +1,18 @@
+name: Raw event retention
+on:
+  schedule:
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python ml/retention.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RETENTION_DAYS: ${{ vars.RETENTION_DAYS }}

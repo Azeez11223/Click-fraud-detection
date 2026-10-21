@@ -1,0 +1,46 @@
+name: Train and publish model
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing or new GitHub Release tag
+        required: true
+        type: string
+      baseline_tag:
+        description: Optional previous model release used for regression checks
+        required: false
+        type: string
+permissions:
+  contents: write
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python data/generate_dataset.py
+      - run: python -m ml.train
+        env:
+          C_FP: "1"
+          C_FN: "10"
+      - name: Check against previous release
+        if: ${{ inputs.baseline_tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_TAG: ${{ inputs.baseline_tag }}
+        run: |
+          mkdir -p /tmp/model-baseline
+          gh release download "$BASELINE_TAG" --pattern metadata.json --dir /tmp/model-baseline
+          python -m ml.check_regression models/metadata.json /tmp/model-baseline/metadata.json
+      - name: Create release and upload pinned artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          sha256sum models/model.json > models/model.json.sha256
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --title "AdShield model $RELEASE_TAG" --notes "Offline synthetic training artifact. See metadata.json for data fingerprint and metrics."
+          gh release upload "$RELEASE_TAG" models/model.json models/model.json.sha256 models/metadata.json --clobber
