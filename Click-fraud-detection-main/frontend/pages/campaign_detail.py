@@ -204,12 +204,15 @@ def render():
         df_log = pd.DataFrame(clicks)
         df_log["created_at"] = pd.to_datetime(df_log["created_at"]).dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        display_df = df_log[["id", "ip_address", "user_agent", "classification", "fraud_reason", "created_at"]].rename(columns={
+        import json
+        df_log["Reasons"] = df_log.get("reason_codes", pd.Series([[]] * len(df_log))).apply(
+            lambda value: ", ".join(value if isinstance(value, list) else json.loads(value or "[]")))
+        display_df = df_log[["id", "ip_address", "user_agent", "classification", "score", "decision", "Reasons", "model_version", "created_at"]].rename(columns={
             "id": "ID",
             "ip_address": "IP Address",
             "user_agent": "User Agent",
             "classification": "Classification",
-            "fraud_reason": "Reason",
+            "score": "Risk Score", "decision": "Decision", "model_version": "Model",
             "created_at": "Timestamp",
         })
 
@@ -223,7 +226,10 @@ def render():
                 "IP Address":     st.column_config.TextColumn("IP Address", width="medium"),
                 "User Agent":     st.column_config.TextColumn("User Agent", width="medium"),
                 "Classification": st.column_config.TextColumn("Classification", width="small"),
-                "Reason":         st.column_config.TextColumn("Reason", width="medium"),
+                "Risk Score":     st.column_config.NumberColumn("Risk Score", format="%.3f", width="small"),
+                "Decision":       st.column_config.TextColumn("Decision", width="small"),
+                "Reasons":        st.column_config.TextColumn("Reasons", width="large"),
+                "Model":          st.column_config.TextColumn("Model", width="small"),
                 "Timestamp":      st.column_config.TextColumn("Timestamp", width="medium"),
             },
         )

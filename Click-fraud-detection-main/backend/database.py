@@ -539,7 +539,8 @@ def classify_click(campaign_id, ip_address, user_agent, user_id=None, include_de
         features = build_features(ip_click_count=c1, click_interval=interval,
             user_agent=user_agent, subnet_click_count=subnet_count, ua_click_count=cu)
         scored = score(features)
-        action, rule_reasons = rule_decision(ip_click_count=c1 + 1, ua_bot=bool(features["ua_bot"]))
+        action, rule_reasons = rule_decision(ip_click_count=c1 + 1, ua_bot=bool(features["ua_bot"]),
+            click_interval=interval, ua_click_count=cu + 1)
         action = action or decide(scored["score"])
         reason_codes = rule_reasons or scored["reason_codes"]
         review_burst = max(1, int(os.getenv("IP_REVIEW_5MIN_THRESHOLD", "10")))
@@ -548,13 +549,13 @@ def classify_click(campaign_id, ip_address, user_agent, user_id=None, include_de
         if c3 >= review_burst - 1 or cu >= review_ua - 1:
             action = "REVIEW"
             reason = "Repeated IP or user-agent activity"
-            reason_codes = ["repeated_ip_or_user_agent"]
+            reason_codes = ["RAPID_REPEAT" if interval < 2 else "UA_FLOOD"]
         elif c1 >= block_ip - 1:
             action = "BLOCK"
             reason = f"Same IP >={block_ip} clicks in 60 seconds"
-            reason_codes = ["ip_click_rate_high"]
+            reason_codes = ["HIGH_FREQUENCY_IP"]
         else:
-            reason = ", ".join(reason_codes)
+            reason = ", ".join(reason_codes) or "Model risk score"
         classification = {"BLOCK": "FRAUD", "REVIEW": "SUSPICIOUS", "ALLOW": "VALID"}[action]
         details = (classification, reason, float(scored["score"]), reason_codes, scored["model_version"])
         return details if include_details else details[:2]
@@ -568,9 +569,12 @@ def insert_campaign_click(campaign_id, ip_address, user_agent="", user_id=None, 
         existing = check.execute("SELECT id,classification,fraud_reason,score,decision,reason_codes,model_version FROM campaign_clicks WHERE campaign_id=? AND event_id=?", (campaign_id, event_id)).fetchone()
         check.close()
         if existing:
+            replay_reasons = json.loads(existing["reason_codes"] or "[]")
+            if "REPLAYED_EVENT" not in replay_reasons:
+                replay_reasons.append("REPLAYED_EVENT")
             return {"id": existing["id"], "classification": existing["classification"],
                 "reason": existing["fraud_reason"], "score": existing["score"],
-                "decision": existing["decision"], "reason_codes": json.loads(existing["reason_codes"] or "[]"),
+                "decision": existing["decision"], "reason_codes": replay_reasons,
                 "model_version": existing["model_version"], "replayed": True}
     classification, reason, risk, reason_codes, model_version = classify_click(
         campaign_id, ip_address, user_agent, user_id, include_details=True

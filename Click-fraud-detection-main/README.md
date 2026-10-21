@@ -2,6 +2,8 @@
 
 > A click fraud detection prototype with synthetic data, simulated platform events, IP lists, and bulk dataset uploads. It is not production-ready.
 
+**Positioning:** AdShield is explainable, cost-aware, open-source click-fraud detection for small advertisers. It is an assistive prototype, not a replacement for commercial fraud-detection tools or ad-platform enforcement.
+
 ---
 
 ## What's New in v3

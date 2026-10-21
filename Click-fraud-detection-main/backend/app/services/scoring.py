@@ -40,6 +40,13 @@ def _load_model():
     return model
 
 
+_FEATURE_REASON = {
+    "ip_click_count": "HIGH_FREQUENCY_IP", "click_interval": "RAPID_REPEAT",
+    "ua_missing": "MISSING_UA", "ua_bot": "HEADLESS_UA",
+    "subnet_click_count": "SUBNET_BURST", "ua_click_count": "UA_FLOOD",
+}
+
+
 def score(features: dict[str, float]) -> dict:
     model = _load_model()
     if model is None:
@@ -54,7 +61,8 @@ def score(features: dict[str, float]) -> dict:
     reasons: list[str] = []
     try:
         contributions = booster.predict(frame, pred_contribs=True)[0][:-1]
-        reasons = [ordered[i] for i in sorted(range(len(ordered)), key=lambda i: abs(float(contributions[i])), reverse=True)[:3]]
+        reasons = [_FEATURE_REASON.get(ordered[i], ordered[i].upper())
+                   for i in sorted(range(len(ordered)), key=lambda i: abs(float(contributions[i])), reverse=True)[:3]]
     except (AttributeError, ValueError, TypeError):
         reasons = []
     return {"score": probability, "model_version": os.getenv("MODEL_VERSION", "unknown"),
