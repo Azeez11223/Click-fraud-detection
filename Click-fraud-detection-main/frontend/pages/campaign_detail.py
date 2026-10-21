@@ -1,7 +1,6 @@
 """
 pages/campaign_detail.py — Single campaign detail page with stats, charts, click log, and alerts
 """
-import random
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -9,7 +8,6 @@ from components.api import (
     get_campaign, get_campaign_clicks_api,
     get_campaign_stats, get_campaign_alerts,
     get_threshold_analysis, set_campaign_block_threshold, update_campaign_economics,
-    simulate_click,
 )
 from components.styles import apply_chart_theme
 
@@ -121,49 +119,7 @@ def render():
 
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    # ── Simulate click section ─────────────────────────────────────────────────
-    with st.expander("🧪 Simulate Clicks (for testing)", expanded=False):
-        sim_col1, sim_col2, sim_col3 = st.columns([2, 2, 1])
-        with sim_col1:
-            sim_ip = st.text_input("IP Address", value=f"192.168.1.{random.randint(1,255)}", key="sim_ip")
-        with sim_col2:
-            sim_ua = st.text_input("User-Agent", value="Mozilla/5.0 TestBot", key="sim_ua")
-        with sim_col3:
-            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-            if st.button("⚡ Send Click", use_container_width=True, key="sim_btn"):
-                result, code = simulate_click(campaign_id, sim_ip, sim_ua)
-                if code == 200:
-                    cls = result.get("classification", "?")
-                    reason = result.get("reason", "")
-                    if cls == "FRAUD":
-                        st.error(f"🚨 FRAUD — {reason}")
-                    elif cls == "SUSPICIOUS":
-                        st.warning(f"⚠ SUSPICIOUS — {reason}")
-                    else:
-                        st.success("✅ VALID CLICK")
-                    st.rerun()
-                else:
-                    st.error("Failed to record click")
-
-        # Rapid-fire test
-        st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-        rf1, rf2, rf3 = st.columns([1, 1, 3])
-        with rf1:
-            if st.button("🤖 Simulate 10 Rapid Clicks", use_container_width=True, key="rapid_btn"):
-                bot_ip = f"10.0.0.{random.randint(1,50)}"
-                for _ in range(10):
-                    simulate_click(campaign_id, bot_ip, "BotAgent/1.0")
-                st.success(f"Sent 10 rapid clicks from {bot_ip}")
-                st.rerun()
-        with rf2:
-            if st.button("✅ Simulate 5 Normal Clicks", use_container_width=True, key="normal_btn"):
-                for i in range(5):
-                    normal_ip = f"{random.randint(50,200)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
-                    simulate_click(campaign_id, normal_ip, f"Chrome/{random.randint(90,120)}.0")
-                st.success("Sent 5 normal clicks from unique IPs")
-                st.rerun()
-
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    st.info("Click events use the campaign authenticated API key. For sample data, run `python -m data.seed_demo --user-id <your-user-id>` to create an explicitly synthetic demo campaign.")
 
     # ── Charts row ─────────────────────────────────────────────────────────────
     if total > 0:

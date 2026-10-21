@@ -34,7 +34,10 @@ def _load_model():
                 return None
     if not os.path.isfile(path):
         return None
-    from xgboost import XGBClassifier
+    try:
+        from xgboost import XGBClassifier
+    except ImportError:
+        return None
     model = XGBClassifier()
     model.load_model(path)
     return model

@@ -6,6 +6,49 @@
 
 The recommended block threshold is `C_fp / (C_fp + C_fn)`, where `C_fp = avg_conversion_value × expected_conversion_rate` estimates the cost of blocking a legitimate click, and `C_fn = CPC` estimates the cost of allowing a fraudulent click. These are assumptions, and historical what-if amounts are estimates from stored scores and classifications, not confirmed conversions or recovered spend.
 
+## MVP feature status
+
+| Capability | Status | Scope |
+|---|---|---|
+| Authenticated campaigns, click scoring, reason codes, model version | Implemented | Rules and an optional locally trained XGBoost model; synthetic data is for demonstration only. |
+| Per-campaign cost assumptions and block threshold | Implemented | Estimates use each campaign's entered assumptions and existing stored event labels. |
+| IP block/allow lists, uploaded IP lists, supplied platform events | Implemented | Platform events are manually supplied or simulated; there are no direct ad-platform connections. |
+| Cloud/Tor IP intelligence, JS collection, automated ad-platform exclusions, outbound notifications | Not implemented | These require separate signal-ingest, privacy, and service work. |
+| Validation on real advertiser traffic | Not established | No real campaign dataset or independently verified ground truth is bundled. |
+
+## Local showcase demo (Windows PowerShell)
+
+Install only the lightweight API and dashboard dependencies for the demo; model training dependencies are optional.
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-api.txt -r requirements-ui.txt
+$env:JWT_SECRET = "replace-with-a-random-secret-at-least-32-characters"
+```
+
+In the first terminal, start the API:
+
+```powershell
+uvicorn backend.main:app --reload
+```
+
+In a second terminal, start the dashboard:
+
+```powershell
+$env:API_BASE = "http://localhost:8000"
+streamlit run frontend/app.py
+```
+
+Create an account from the dashboard signup page. To get that account's local SQLite ID and add the repeatable demo campaign:
+
+```powershell
+$userId = python -c "import sqlite3; c=sqlite3.connect('click_fraud.db'); print(c.execute('SELECT id FROM users ORDER BY id DESC LIMIT 1').fetchone()[0])"
+python -m data.seed_demo --user-id $userId
+```
+
+Open **Campaigns** and select **[SYNTHETIC DEMO] Click review walkthrough**. The seed uses reserved documentation IP ranges and synthetic user-agent strings. The dashboard shows the detector's outputs; these are not ground-truth attack labels or measured detection rates. The seed is idempotent and can be run again safely.
+
 ---
 
 ## What's New in v3
