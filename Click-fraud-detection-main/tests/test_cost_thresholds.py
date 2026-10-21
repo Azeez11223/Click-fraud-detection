@@ -34,6 +34,13 @@ def test_campaign_cost_settings_are_owned(client, user_a, user_b):
     assert created.status_code == 200
     campaign_id = created.json()["campaign_id"]
     assert client.get(f"/campaigns/{campaign_id}/threshold-analysis", headers=user_a["headers"]).status_code == 200
+    changed_costs = client.patch(f"/campaigns/{campaign_id}/economics", headers=user_a["headers"],
+        json={"cpc": 2.25, "avg_conversion_value": 42, "expected_conversion_rate": 0.08})
+    assert changed_costs.status_code == 200
+    current = client.get(f"/campaigns/{campaign_id}", headers=user_a["headers"]).json()
+    assert current["cpc"] == 2.25
+    assert current["avg_conversion_value"] == 42
+    assert current["expected_conversion_rate"] == 0.08
     saved = client.patch(f"/campaigns/{campaign_id}/block-threshold", headers=user_a["headers"],
                          json={"block_threshold": 0.62})
     assert saved.status_code == 200

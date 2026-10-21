@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from components.api import (
     get_campaign, get_campaign_clicks_api,
     get_campaign_stats, get_campaign_alerts,
-    get_threshold_analysis, set_campaign_block_threshold,
+    get_threshold_analysis, set_campaign_block_threshold, update_campaign_economics,
     simulate_click,
 )
 from components.styles import apply_chart_theme
@@ -75,6 +75,25 @@ def render():
 
     economics = get_threshold_analysis(campaign_id)
     if economics:
+        with st.expander("Campaign cost assumptions", expanded=False):
+            with st.form(f"economics_{campaign_id}"):
+                cost_a, cost_b, cost_c = st.columns(3)
+                with cost_a:
+                    cpc = st.number_input("Cost per click", min_value=0.0,
+                        value=float(campaign.get("cpc", 0.5)), step=0.05)
+                with cost_b:
+                    conversion_value = st.number_input("Average conversion value", min_value=0.0,
+                        value=float(campaign.get("avg_conversion_value", 25.0)), step=1.0)
+                with cost_c:
+                    conversion_rate = st.number_input("Expected conversion rate", min_value=0.0,
+                        max_value=1.0, value=float(campaign.get("expected_conversion_rate", 0.02)), step=0.01,
+                        format="%.3f")
+                if st.form_submit_button("Save cost assumptions"):
+                    result, status = update_campaign_economics(
+                        campaign_id, cpc, conversion_value, conversion_rate)
+                    if status == 200:
+                        st.rerun()
+                    st.error(result.get("detail", "Could not save cost assumptions"))
         recommended = float(economics.get("recommended_block_threshold", 0.75))
         active_threshold = float(economics.get("active_block_threshold", recommended))
         selected_threshold = st.slider("Block sensitivity (risk score)", 0.01, 1.0,
