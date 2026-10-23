@@ -16,41 +16,6 @@ The recommended block threshold is `C_fp / (C_fp + C_fn)`, where `C_fp = avg_con
 | Cloud/Tor IP intelligence, JS collection, automated ad-platform exclusions, outbound notifications | Not implemented | These require separate signal-ingest, privacy, and service work. |
 | Validation on real advertiser traffic | Not established | No real campaign dataset or independently verified ground truth is bundled. |
 
-## Local showcase demo (Windows PowerShell)
-
-Install only the lightweight API and dashboard dependencies for the demo; model training dependencies are optional.
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-api.txt -r requirements-ui.txt
-$env:JWT_SECRET = "replace-with-a-random-secret-at-least-32-characters"
-```
-
-In the first terminal, start the API:
-
-```powershell
-uvicorn backend.main:app --reload
-```
-
-In a second terminal, start the dashboard:
-
-```powershell
-$env:API_BASE = "http://localhost:8000"
-streamlit run frontend/app.py
-```
-
-Create an account from the dashboard signup page. To get that account's local SQLite ID and add the repeatable demo campaign:
-
-```powershell
-$userId = python -c "import sqlite3; c=sqlite3.connect('click_fraud.db'); print(c.execute('SELECT id FROM users ORDER BY id DESC LIMIT 1').fetchone()[0])"
-python -m data.seed_demo --user-id $userId
-```
-
-Open **Campaigns** and select **[SYNTHETIC DEMO] Click review walkthrough**. The seed uses reserved documentation IP ranges and synthetic user-agent strings. The dashboard shows the detector's outputs; these are not ground-truth attack labels or measured detection rates. The seed is idempotent and can be run again safely.
-
----
-
 ## What's New in v3
 
 | Feature | Description |
@@ -67,35 +32,51 @@ Open **Campaigns** and select **[SYNTHETIC DEMO] Click review walkthrough**. The
 
 ```
 backend/       FastAPI, auth, persistence, scoring services
-frontend/      Streamlit pages and API client
+web/           React, TypeScript, and Vite dashboard
 data/          Synthetic sample data and generator
 ml/            Offline training, monitoring, retention
 migrations/    Alembic PostgreSQL schema history
 docs/          Architecture, model card, deployment, runbook
-docker/        API image; Compose starts local PostgreSQL and UI
+docker/        API image; Compose starts local PostgreSQL and API
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Install dependencies
+The dashboard uses React/Vite and the API uses FastAPI. Start them in separate terminals.
+
+### 1. Install API dependencies and start FastAPI
+
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+# macOS/Linux: source .venv/bin/activate
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -r requirements-api.txt
 ```
 
-### 2. Start the FastAPI backend
+Set a JWT secret and the local web origin before starting the API:
+
 ```bash
+# macOS/Linux
 export JWT_SECRET="replace-with-a-random-value-of-at-least-32-characters"
+export CORS_ORIGINS="http://localhost:5173"
 uvicorn backend.main:app --reload
 ```
-API: `http://localhost:8000` · Docs: `http://localhost:8000/docs`. Local mode uses SQLite. To run PostgreSQL, set `DATABASE_URL` and apply `alembic upgrade head` first.
 
-### 3. Launch Streamlit dashboard
+In PowerShell, use `$env:JWT_SECRET='...'` and `$env:CORS_ORIGINS='http://localhost:5173'`. API docs: `http://localhost:8000/docs`. Local mode uses SQLite.
+
+### 2. Start the web app
+
 ```bash
-streamlit run frontend/app.py
+cd web
+npm ci
+npm run dev
 ```
-Dashboard: `http://localhost:8501`
+
+Open `http://localhost:5173` and create an account. See [web/README.md](web/README.md) for Vercel deployment, environment variables, and frontend checks.
+
+For the repeatable synthetic campaign walkthrough, create an account first, then run `python -m data.seed_demo --user-id <local-user-id>`. The seed data uses reserved documentation IP ranges and synthetic user-agent strings; its labels are not independently verified ground truth.
 
 ---
 
@@ -155,6 +136,6 @@ ip_address,note
 - **ML**: XGBoost + sklearn fallback + SMOTE
 - **API**: FastAPI + Uvicorn + Pydantic v2 + python-multipart
 - **Auth**: JWT (PyJWT) + bcrypt
-- **Frontend**: Streamlit 1.32+ + Plotly
+- **Frontend**: React + TypeScript + Vite + Tailwind + TanStack Query + Recharts
 - **Database**: SQLite (9 tables)
 - **Fonts**: Syne · IBM Plex Mono · Inter

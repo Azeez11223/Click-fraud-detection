@@ -13,7 +13,7 @@ import pytest
 os.environ["JWT_SECRET"] = "test-secret-key-that-is-at-least-32-characters-long"
 os.environ["ADMIN_EMAILS"] = "admin@test.com"
 os.environ["ENV"] = "development"
-os.environ["CORS_ORIGINS"] = "http://localhost:8501"
+os.environ["CORS_ORIGINS"] = "http://localhost:5173,http://localhost:8501"
 
 # Point database to a temp file
 _tmp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)

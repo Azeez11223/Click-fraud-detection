@@ -222,7 +222,8 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_audit_actor_time ON audit_events(actor_user_id,created_at DESC)")
 
     campaign_columns = {row[1] for row in c.execute("PRAGMA table_info(campaigns)").fetchall()}
-    for column, declaration in {"cpc": "REAL NOT NULL DEFAULT 0.50",
+    for column, declaration in {"api_key_hash": "TEXT",
+                                "cpc": "REAL NOT NULL DEFAULT 0.50",
                                 "avg_conversion_value": "REAL NOT NULL DEFAULT 25.0",
                                 "expected_conversion_rate": "REAL NOT NULL DEFAULT 0.02",
                                 "block_threshold": "REAL"}.items():

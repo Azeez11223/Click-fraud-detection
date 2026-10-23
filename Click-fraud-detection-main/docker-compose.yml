@@ -19,7 +19,7 @@ services:
       JWT_SECRET: local-development-secret-at-least-32-chars
       DATABASE_URL: postgresql://adshield:local-only@postgres:5432/adshield
       ENV: development
-      CORS_ORIGINS: http://localhost:8501
+      CORS_ORIGINS: http://localhost:5173,http://localhost:8501
       FORWARDED_ALLOW_IPS: "127.0.0.1"
     ports: ["8000:8000"]
     depends_on:

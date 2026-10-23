@@ -89,7 +89,7 @@ ENV = os.environ.get("ENV", "development")
 IS_PRODUCTION = ENV.lower() == "production"
 CORS_ORIGINS = [
     o.strip()
-    for o in os.environ.get("CORS_ORIGINS", "http://localhost:8501").split(",")
+    for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173,https://adshield.vercel.app").split(",")
     if o.strip()
 ]
 
@@ -244,11 +244,146 @@ class ClickRequest(BaseModel):
     @field_validator("browser")
     @classmethod
     def val_browser(cls, v):
-        # Normalize unknown browsers to "Other" instead of rejecting with 422
         known = {"chrome", "firefox", "safari", "edge", "opera"}
         if v.lower() not in known:
             return "Other"
         return v.capitalize()
+
+
+class FlexibleResponse(BaseModel):
+    """Typed known fields while preserving additional database columns in responses."""
+    model_config = {"extra": "allow"}
+
+
+class AuthUserResponse(BaseModel):
+    id: int
+    name: str
+    email: EmailStr
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: AuthUserResponse
+
+
+class UserResponse(AuthUserResponse):
+    pass
+
+
+class StatsResponse(BaseModel):
+    total: int
+    fraud: int
+    review: int
+    legit: int
+    fraud_rate: float
+
+
+class CampaignResponse(FlexibleResponse):
+    id: int
+    user_id: int
+    name: str
+    ad_type: str
+    platform: str
+    purpose: str
+    status: str
+    created_at: str | None = None
+    cpc: float | None = None
+    avg_conversion_value: float | None = None
+    expected_conversion_rate: float | None = None
+    block_threshold: float | None = None
+    click_count: int | None = None
+    fraud_count: int | None = None
+    valid_count: int | None = None
+    suspicious_count: int | None = None
+
+
+class CampaignCreateResponse(BaseModel):
+    message: str
+    campaign_id: int
+    api_key: str
+    note: str
+
+
+class CampaignClickResponse(FlexibleResponse):
+    id: int
+    campaign_id: int
+    ip_address: str
+    classification: str
+    fraud_reason: str | None = None
+    score: float | None = None
+    decision: str | None = None
+    reason_codes: str | list[str] | None = None
+    model_version: str | None = None
+    created_at: str | None = None
+
+
+class CampaignStatsResponse(BaseModel):
+    total: int
+    fraud: int
+    suspicious: int
+    valid: int
+    fraud_rate: float
+
+
+class ThresholdAnalysisResponse(BaseModel):
+    recommended_block_threshold: float
+    active_block_threshold: float
+    analysis: dict
+    estimate_notice: str
+
+
+class AlertResponse(BaseModel):
+    level: str
+    message: str
+    campaign_id: int | None = None
+    campaign_name: str | None = None
+
+
+class IPListResponse(FlexibleResponse):
+    id: int
+    user_id: int
+    ip_address: str
+    list_type: str
+    note: str | None = None
+    source: str | None = None
+    created_at: str | None = None
+
+
+class IPListCountsResponse(BaseModel):
+    blocked: int
+    whitelisted: int
+    total: int
+
+
+class IPDatasetResponse(FlexibleResponse):
+    id: int
+    user_id: int
+    filename: str
+    list_type: str
+    row_count: int
+    created_at: str | None = None
+
+
+class RealtimeFeedResponse(BaseModel):
+    source: str
+    platform: str
+    event_type: str
+    ip_address: str
+    country: str
+    device: str
+    browser: str
+    cost_usd: float
+    classification: str
+    fraud_reason: str | None = None
+    created_at: str
+
+
+class HourlyBreakdownResponse(BaseModel):
+    hour: str
+    platform: str
+    classification: str
+    cnt: int
 
 
 class SignupRequest(BaseModel):
@@ -416,11 +551,68 @@ def metrics(user=Depends(get_current_user)):
 
 
 @app.get("/clicks", tags=["Data"])
-def recent_clicks(limit: int = Query(default=50, le=200), user=Depends(get_current_user)):
+def recent_clicks(limit: int = Query(default=50, ge=1, le=500), user=Depends(get_current_user)):
     return get_recent_predictions(limit, user_id=user["user_id"])
 
 
-@app.get("/stats", tags=["Data"])
+@app.get("/history", tags=["Data"])
+def prediction_history(
+    limit: int = Query(default=25, ge=1, le=500), offset: int = Query(default=0, ge=0),
+    date_from: str | None = None, date_to: str | None = None,
+    verdict: str | None = None, campaign_id: int | None = None,
+    sort_by: str = Query(default="id", pattern="^(id|ip_address|result|confidence|created_at)$"),
+    sort_order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    user=Depends(get_current_user),
+):
+    """Paginated prediction history with account-scoped filters."""
+    clauses = ["user_id=?"]
+    params: list[object] = [user["user_id"]]
+    if date_from:
+        clauses.append("date(created_at) >= date(?)"); params.append(date_from)
+    if date_to:
+        clauses.append("date(created_at) <= date(?)"); params.append(date_to)
+    if verdict:
+        if verdict not in {"Fraud", "Legit"}:
+            raise HTTPException(400, "verdict must be Fraud or Legit")
+        clauses.append("result=?"); params.append(verdict)
+    if campaign_id is not None:
+        if get_campaign_owner_id(campaign_id) != user["user_id"]:
+            raise HTTPException(404, "Campaign not found")
+        campaign_clauses = ["campaign_id=?"]
+        campaign_params: list[object] = [campaign_id]
+        if date_from:
+            campaign_clauses.append("date(created_at) >= date(?)"); campaign_params.append(date_from)
+        if date_to:
+            campaign_clauses.append("date(created_at) <= date(?)"); campaign_params.append(date_to)
+        if verdict:
+            campaign_clauses.append("classification=?"); campaign_params.append("FRAUD" if verdict == "Fraud" else "VALID")
+        where_campaign = " AND ".join(campaign_clauses)
+        conn = get_connection()
+        total = conn.execute(f"SELECT COUNT(*) FROM campaign_clicks WHERE {where_campaign}", campaign_params).fetchone()[0]
+        campaign_sort = {"id": "id", "ip_address": "ip_address", "result": "classification", "confidence": "score", "created_at": "created_at"}[sort_by]
+        campaign_rows = conn.execute(
+            f"SELECT id,ip_address,classification AS result,score AS confidence,decision,reason_codes,model_version,created_at FROM campaign_clicks WHERE {where_campaign} ORDER BY {campaign_sort} {sort_order.upper()} LIMIT ? OFFSET ?",
+            [*campaign_params, limit, offset],
+        ).fetchall()
+        conn.close()
+        items = []
+        for row in campaign_rows:
+            item = {**dict(row), "result": "Fraud" if row["result"] == "FRAUD" else "Legit" if row["result"] == "VALID" else "Suspicious"}
+            item["reason_codes"] = json.loads(row["reason_codes"] or "[]")
+            items.append(item)
+        return {"items": items, "total": total}
+    where = " AND ".join(clauses)
+    conn = get_connection()
+    total = conn.execute(f"SELECT COUNT(*) FROM predictions WHERE {where}", params).fetchone()[0]
+    rows = conn.execute(
+        f"SELECT id,ip_address,result,confidence,decision,reason_codes,model_version,created_at FROM predictions WHERE {where} ORDER BY {sort_by} {sort_order.upper()} LIMIT ? OFFSET ?",
+        [*params, limit, offset],
+    ).fetchall()
+    conn.close()
+    return {"items": [{**dict(row), "reason_codes": json.loads(row["reason_codes"] or "[]")} for row in rows], "total": total}
+
+
+@app.get("/stats", tags=["Data"], response_model=StatsResponse)
 def fraud_stats(user=Depends(get_current_user)):
     return get_prediction_stats(user_id=user["user_id"])
 
@@ -442,7 +634,7 @@ def signup(req: SignupRequest, request: Request):
     return {"message": "Account created", "user_id": uid}
 
 
-@app.post("/auth/login", tags=["Auth"])
+@app.post("/auth/login", tags=["Auth"], response_model=LoginResponse)
 @limiter.limit(AUTH_RATE_LIMIT)
 def login(req: LoginRequest, request: Request):
     if len(_LOGIN_FAILURES) > 10_000:
@@ -468,7 +660,7 @@ def login(req: LoginRequest, request: Request):
     }
 
 
-@app.get("/auth/me", tags=["Auth"])
+@app.get("/auth/me", tags=["Auth"], response_model=UserResponse)
 def me(user=Depends(get_current_user)):
     db_user = get_user_by_id(user["user_id"])
     if not db_user:
@@ -484,13 +676,13 @@ def delete_account(user=Depends(get_current_user)):
 
 
 # ── Campaigns ──────────────────────────────────────────────────────────────────
-@app.get("/campaigns", tags=["Campaigns"])
+@app.get("/campaigns", tags=["Campaigns"], response_model=list[CampaignResponse])
 def list_campaigns(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
                    user=Depends(get_current_user)):
     return get_campaigns_by_user(user["user_id"], limit, offset)
 
 
-@app.post("/campaigns", tags=["Campaigns"])
+@app.post("/campaigns", tags=["Campaigns"], response_model=CampaignCreateResponse)
 def create_campaign(req: CampaignRequest, user=Depends(get_current_user)):
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
@@ -524,7 +716,7 @@ def update_campaign_economics(campaign_id: int, req: CampaignEconomicsRequest,
     return {"message": "Campaign economics updated"}
 
 
-@app.get("/campaigns/{campaign_id}/threshold-analysis", tags=["Campaigns"])
+@app.get("/campaigns/{campaign_id}/threshold-analysis", tags=["Campaigns"], response_model=ThresholdAnalysisResponse)
 def campaign_threshold_analysis(campaign_id: int, threshold: float | None = Query(None, ge=0, le=1),
                                 user=Depends(get_current_user)):
     campaign = get_campaign_by_id(campaign_id, user["user_id"])
@@ -560,7 +752,7 @@ def set_campaign_block_threshold(campaign_id: int, req: BlockThresholdRequest,
     return {"block_threshold": req.block_threshold}
 
 
-@app.get("/campaigns/{campaign_id}", tags=["Campaigns"])
+@app.get("/campaigns/{campaign_id}", tags=["Campaigns"], response_model=CampaignResponse)
 def get_campaign_detail(campaign_id: int, user=Depends(get_current_user)):
     c = get_campaign_by_id(campaign_id, user["user_id"])
     if not c:
@@ -627,7 +819,7 @@ def record_click(campaign_id: int, req: CampaignClickRequest, request: Request):
     return result
 
 
-@app.get("/campaigns/{campaign_id}/clicks", tags=["Campaign Clicks"])
+@app.get("/campaigns/{campaign_id}/clicks", tags=["Campaign Clicks"], response_model=list[CampaignClickResponse])
 def get_clicks(campaign_id: int, limit: int = Query(100, ge=1, le=500),
                offset: int = Query(0, ge=0), user=Depends(get_current_user)):
     if not get_campaign_by_id(campaign_id, user["user_id"]):
@@ -635,7 +827,7 @@ def get_clicks(campaign_id: int, limit: int = Query(100, ge=1, le=500),
     return get_campaign_clicks(campaign_id, limit, offset)
 
 
-@app.get("/campaigns/{campaign_id}/stats", tags=["Campaign Clicks"])
+@app.get("/campaigns/{campaign_id}/stats", tags=["Campaign Clicks"], response_model=CampaignStatsResponse)
 def get_stats(campaign_id: int, user=Depends(get_current_user)):
     if not get_campaign_by_id(campaign_id, user["user_id"]):
         raise HTTPException(404, "not found")
@@ -649,18 +841,27 @@ def get_alerts(campaign_id: int, user=Depends(get_current_user)):
     return check_campaign_alerts(campaign_id)
 
 
+@app.get("/alerts", tags=["Campaign Clicks"], response_model=list[AlertResponse])
+def all_alerts(user=Depends(get_current_user)):
+    alerts = []
+    for campaign in get_campaigns_by_user(user["user_id"], limit=500):
+        for alert in check_campaign_alerts(campaign["id"]):
+            alerts.append({**alert, "campaign_id": campaign["id"], "campaign_name": campaign["name"]})
+    return alerts
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  NEW v3 — IP List endpoints
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.get("/ip-lists", tags=["IP Lists"])
+@app.get("/ip-lists", tags=["IP Lists"], response_model=list[IPListResponse])
 def list_ips(list_type: str | None = None, limit: int = Query(100, ge=1, le=500),
              offset: int = Query(0, ge=0), user=Depends(get_current_user)):
     """Return all blocked/whitelisted IPs for the current user."""
     return get_ip_list(user["user_id"], list_type, limit, offset)
 
 
-@app.get("/ip-lists/counts", tags=["IP Lists"])
+@app.get("/ip-lists/counts", tags=["IP Lists"], response_model=IPListCountsResponse)
 def ip_counts(user=Depends(get_current_user)):
     return get_ip_list_counts(user["user_id"])
 
@@ -767,7 +968,7 @@ async def upload_dataset(
     }
 
 
-@app.get("/ip-datasets", tags=["IP Datasets"])
+@app.get("/ip-datasets", tags=["IP Datasets"], response_model=list[IPDatasetResponse])
 def list_datasets(limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
                   user=Depends(get_current_user)):
     return get_ip_datasets(user["user_id"], limit, offset)
@@ -820,14 +1021,14 @@ def plat_stats(campaign_id: int, user=Depends(get_current_user)):
     return get_platform_stats(campaign_id)
 
 
-@app.get("/campaigns/{campaign_id}/realtime-feed", tags=["Platform"])
+@app.get("/campaigns/{campaign_id}/realtime-feed", tags=["Platform"], response_model=list[RealtimeFeedResponse])
 def realtime(campaign_id: int, limit: int = Query(30, le=100), user=Depends(get_current_user)):
     if not get_campaign_by_id(campaign_id, user["user_id"]):
         raise HTTPException(404, "not found")
     return get_realtime_feed(campaign_id, limit)
 
 
-@app.get("/campaigns/{campaign_id}/hourly-breakdown", tags=["Platform"])
+@app.get("/campaigns/{campaign_id}/hourly-breakdown", tags=["Platform"], response_model=list[HourlyBreakdownResponse])
 def hourly(campaign_id: int, hours: int = Query(24, le=168), user=Depends(get_current_user)):
     if not get_campaign_by_id(campaign_id, user["user_id"]):
         raise HTTPException(404, "not found")
