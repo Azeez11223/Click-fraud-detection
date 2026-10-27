@@ -13,10 +13,12 @@ export function SettingsTab({ campaign }: { campaign: Campaign }) {
   const [error, setError] = useState('')
   const remove = useMutation({
     mutationFn: () => deleteCampaign(campaign.id),
-    onSuccess: async () => {
+    onSuccess: () => {
       client.removeQueries({ queryKey: ['campaign', campaign.id] })
-      await client.invalidateQueries({ queryKey: ['campaigns'] })
-      navigate('/campaigns')
+      client.setQueryData<Campaign[]>(['campaigns'], (current) => current?.filter((item) => item.id !== campaign.id))
+      navigate('/campaigns', { replace: true })
+      // Do not keep the delete dialog or route open while a slow API refresh runs.
+      void client.invalidateQueries({ queryKey: ['campaigns'] })
     },
     onError: (reason) => setError(reason instanceof ApiError ? reason.message : 'Could not delete this campaign. Please retry.'),
   })

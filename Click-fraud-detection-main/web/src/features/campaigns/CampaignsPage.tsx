@@ -37,7 +37,9 @@ export default function CampaignsPage() {
       if (context?.previous) client.setQueryData(['campaigns'], context.previous)
       setActionError(error instanceof ApiError ? error.message : 'Could not update this campaign. Please retry.')
     },
-    onSettled: () => client.invalidateQueries({ queryKey: ['campaigns'] }),
+    // Keep the confirmation dialog from waiting on a follow-up list request.
+    // The optimistic cache is already current; refresh it in the background.
+    onSettled: () => { void client.invalidateQueries({ queryKey: ['campaigns'] }) },
   })
 
   const rows = (query.data ?? []).filter((campaign) => {
