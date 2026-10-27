@@ -287,7 +287,8 @@ class CampaignResponse(FlexibleResponse):
     platform: str
     purpose: str
     status: str
-    created_at: str | None = None
+    # Database adapters return native datetimes; Pydantic serializes them as ISO strings.
+    created_at: datetime | None = None
     cpc: float | None = None
     avg_conversion_value: float | None = None
     expected_conversion_rate: float | None = None
@@ -315,7 +316,8 @@ class CampaignClickResponse(FlexibleResponse):
     decision: str | None = None
     reason_codes: str | list[str] | None = None
     model_version: str | None = None
-    created_at: str | None = None
+    # Database adapters return native datetimes; Pydantic serializes them as ISO strings.
+    created_at: datetime | None = None
 
 
 class CampaignStatsResponse(BaseModel):
